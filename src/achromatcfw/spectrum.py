@@ -17,7 +17,8 @@ from scipy.interpolate import CubicSpline
 Array = np.ndarray
 
 # Root directory containing all raw *.csv spectral data files
-DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "raw"
+# (two levels up from this module)
+DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
 
 
 # ─────────────────────────────── I/O ────────────────────────────────

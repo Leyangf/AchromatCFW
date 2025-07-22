@@ -24,7 +24,7 @@ from numba import njit
 
 # Import the spectral response curves of the sensor.  ``channel_products``
 # returns wavelength dependent energy terms (S·D) for each colour channel.
-from achromatcfw.io.spectrum_loader import channel_products
+from achromatcfw.spectrum import channel_products
 
 # ------------------------------ Global constants ------------------------------
 # Nominal f-number of the optical system.  Used when converting the chromatic
