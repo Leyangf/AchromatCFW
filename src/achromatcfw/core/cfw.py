@@ -1,7 +1,8 @@
 """Achromatic Color Fringe Width (CFW) core routines.
 
-This module contains JIT‑accelerated kernels and thin Python wrappers that
-compute colour‑fringe related metrics for an optical system.
+This module exposes high-level helpers that compute colour-fringe related
+metrics for an optical system.  Point spread function kernels and the
+low-level edge response are implemented in :mod:`achromatcfw.core.psf`.
 
 Main public entry points
 ------------------------
@@ -9,22 +10,17 @@ Main public entry points
 - :func:Farbsaum        – *binary* colour‑fringe flag at one pixel.
 - :func:Farbsaumbreite  – fringe width (in pixels) across an x‑range.
 - :func:ColorFringe     – *actual* RGB edge responses at one pixel.
-
-Internal helpers are Numba‑compiled for speed; outer wrappers keep type
-safety, parameter validation and sensible defaults.
 """
 from __future__ import annotations
 
-from pathlib import Path
-from math import erf as math_erf, tanh, sqrt, pi, exp, fabs
 from typing import Tuple, Literal
 
 import numpy as np
-from numba import njit
 
 # Import the spectral response curves of the sensor.  ``channel_products``
 # returns wavelength dependent energy terms (S·D) for each colour channel.
 from achromatcfw.io.spectrum_loader import channel_products
+from .psf import ALLOWED_PSF_MODES, DEFAULT_PSF_MODE, compute_edge_jit
 
 # ------------------------------ Global constants ------------------------------
 # Nominal f-number of the optical system.  Used when converting the chromatic
@@ -41,10 +37,6 @@ XRANGE_VAL: int = 400     # half-width of the evaluation window in pixels
 
 defocusrange: int = 650  # defocus range of CHL data in microns
 
-# Valid PSF modes ----------------------------------------------------------------
-ALLOWED_PSF_MODES: tuple[str, ...] = ("disk", "gauss", "gauss_sphe")
-DEFAULT_PSF_MODE: Literal["gauss"] = "gauss"
-
 # ------------------------------ Sensor data ------------------------------------
 # Pre-compute the wavelength weighted sensor responses for each channel.  Only
 # the second column (S·D) is needed for the kernel.
@@ -54,94 +46,6 @@ sensor_map = {
     "G": prods["green"][:, 1],
     "B": prods["blue"][:, 1],
 }
-
-# -----------------------------------------------------------------------------
-# JIT‑accelerated low‑level kernels
-# -----------------------------------------------------------------------------
-@njit(cache=True)
-def Exposure_jit(x: float, F: float) -> float:
-    """Normalised exposure curve using hyperbolic tangent.
-
-    The function is bounded to (-1, 1) when *x* is in (-1, 1), then re‑scaled
-    to (0, 1).
-    """
-    return tanh(F * x) / tanh(F)
-
-
-@njit(cache=True)
-def disk_ESF_jit(x: float, ratio: float) -> float:
-    """Disk PSF edge‑spread function (geometric blur)."""
-    if ratio < 1e-6:
-        return 1.0 if x >= 0.0 else 0.0
-    if x >= ratio:
-        return 1.0
-    if x <= -ratio:
-        return 0.0
-    return 0.5 * (1.0 + x / ratio)
-
-
-@njit(cache=True)
-def gauss_ESF_jit(x: float, ratio: float) -> float:
-    """Gaussian PSF edge‑spread function."""
-    if ratio < 1e-6:
-        return 1.0 if x >= 0.0 else 0.0
-    return 0.5 * (1.0 + math_erf(x / (sqrt(2.0) * 0.5 * ratio)))
-
-
-@njit(cache=True)
-def gauss_ESF_sphe_jit(x: float, ratio: float) -> float:
-    """Gaussian PSF with first‑order spherical aberration (approx.)."""
-    zernike_coef = 0.1  # waves – *parameterise if needed*
-    phi_sigma = 2.0 * pi * zernike_coef
-    strehl = exp(-(phi_sigma ** 2.0))
-    if ratio < 1e-6:
-        return strehl if x >= 0.0 else 0.0
-    return 0.5 * (1.0 + math_erf(x / ratio * sqrt(strehl * 0.5)))
-
-
-@njit(cache=True)
-def compute_edge_jit(
-    x: float,
-    z: float,
-    F: float,
-    gamma: float,
-    sensor_data: np.ndarray,
-    CHLdata: np.ndarray,
-    K_param: float,
-    psf_mode: Literal["disk", "gauss", "gauss_sphe"],
-) -> float:
-    """Edge response for a single pixel location (low‑level kernel)."""
-
-    # Convert the defocus difference ``z - CHLdata[n]`` to an effective blur
-    # radius.  ``K_param`` is the f-number of the system.  The expression below
-    # is derived from the thin lens approximation.
-    denom_factor = sqrt(4.0 * K_param ** 2.0 - 1.0)
-
-    # Integrate contribution across all wavelengths / defocus samples.  Each
-    # sample contributes according to the chosen point spread function and the
-    # spectral sensitivity at that wavelength.
-    acc = 0.0
-    for n in range(CHLdata.size):
-        ratio = fabs((z - CHLdata[n]) / denom_factor)
-        if psf_mode == "disk":
-            weight = disk_ESF_jit(x, ratio)
-        elif psf_mode == "gauss":
-            weight = gauss_ESF_jit(x, ratio)
-        else:  # "gauss_sphe"
-            weight = gauss_ESF_sphe_jit(x, ratio)
-        acc += sensor_data[n] * weight
-
-    # ``sensor_data`` encodes the spectral sensitivity.  The denominator normalises
-    # the weighted sum so that absolute sensor gain does not affect the result.
-    denom = np.sum(sensor_data)
-    if denom == 0.0:
-        # Avoid division by zero if calibration data is malformed.
-        return 0.0
-
-    # Apply the exposure non-linearity and display gamma to obtain the final
-    # pixel value.  The result is clipped to the [0, 1] range by ``Exposure_jit``.
-    return Exposure_jit(acc / denom, F) ** gamma
-
 
 # ------------------------------------------------------------------------------
 # High‑level Python wrappers (type safety, defaults, validation)
